@@ -7,9 +7,7 @@ from ..datastore import redis_store as ds
 from ..processors import rule_engine
 from ..ai import gpt_handler
 from ..alerts import telegram as telegram_module
-
 from fastapi.responses import JSONResponse
-import json as _json
 
 load_dotenv()
 
@@ -80,14 +78,13 @@ async def worker_loop():
 
 @app.on_event("startup")
 async def startup_event():
-    # Bot online झाल्यावर Telegram ला notify करणे
-    try:
-        telegram_module.send_text("🚀 Bot is online and running!")
-    except Exception as e:
-        print("Telegram startup alert failed:", str(e))
-
     loop = asyncio.get_event_loop()
     loop.create_task(worker_loop())
+    # Send bot online alert
+    try:
+        telegram_module.send_text("✅ Bot is ONLINE and running on Railway")
+    except Exception as e:
+        print("Telegram startup alert failed:", str(e))
 
 
 @app.get("/health")
@@ -102,7 +99,7 @@ async def get_recent_signals(limit: int = 50):
         parsed = []
         for item in raw:
             try:
-                parsed.append(_json.loads(item))
+                parsed.append(json.loads(item))
             except Exception:
                 parsed.append({"raw": item})
         return JSONResponse(content={"count": len(parsed), "signals": parsed})
@@ -120,16 +117,42 @@ async def test_telegram():
         return {"sent": False, "error": str(e)}
 
 
-@app.get("/redis-health")
-async def redis_health():
-    """Check Redis connectivity and keys count."""
+# ---------------------------
+# New Dashboard Endpoint
+# ---------------------------
+@app.get("/dashboard")
+async def dashboard(limit: int = 10):
+    """Return summary of Redis signals + health + latest market prices."""
     try:
-        pong = ds.r.ping()
+        # Redis keys
         keys = ds.r.keys("*")
-        return {
-            "redis_ping": pong,
-            "keys_count": len(keys),
-            "keys_sample": [k.decode("utf-8") if isinstance(k, bytes) else str(k) for k in keys[:10]]
-        }
+
+        # Recent signals
+        raw_signals = ds.r.lrange("signals:all", 0, limit - 1)
+        signals = []
+        for item in raw_signals:
+            try:
+                signals.append(json.loads(item))
+            except Exception:
+                signals.append({"raw": item})
+
+        # Latest prices
+        latest = {}
+        for sym in SYMBOLS:
+            snap = ds.get_latest_snapshot(sym) or {}
+            latest[sym] = {
+                "price": snap.get("ticker", {}).get("lastPrice"),
+                "open_interest": snap.get("open_interest", {}).get("openInterest"),
+                "ts": snap.get("ts"),
+            }
+
+        return JSONResponse(
+            content={
+                "redis_keys": [k.decode() if isinstance(k, bytes) else str(k) for k in keys],
+                "signals_count": len(signals),
+                "signals": signals,
+                "latest": latest,
+            }
+        )
     except Exception as e:
-        return {"error": str(e)}
+        return JSONResponse(status_code=500, content={"error": str(e)})
