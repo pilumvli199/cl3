@@ -1,8 +1,4 @@
-# src/app/tasks/main.py
-import os
-import time
-import asyncio
-import json
+import os, time, asyncio, json
 from fastapi import FastAPI
 from dotenv import load_dotenv
 
@@ -11,6 +7,9 @@ from ..datastore import redis_store as ds
 from ..processors import rule_engine
 from ..ai import gpt_handler
 from ..alerts import telegram as telegram_module
+
+from fastapi.responses import JSONResponse
+import json as _json
 
 load_dotenv()
 
@@ -36,7 +35,6 @@ async def worker_loop():
 
             for sym, snap in data.items():
                 if snap.get("error"):
-                    # fixed f-string and inner quotes
                     print(f"[{sym}] fetch error: {snap.get('error')}")
                     continue
 
@@ -70,31 +68,23 @@ async def worker_loop():
                 )
                 _baseline_oi[sym] = current_oi
 
-                # Handle via GPT handler + alerts manager
-                try:
-                    res = gpt_handler.handle_candidate(candidate, {"recent_baseline_oi": baseline})
-                    sent = res.get("result", {}).get("sent", False)
-                except Exception as e:
-                    sent = False
-                    print(f"[{sym}] gpt_handler error: {e}")
-
-                print(f"[{sym}] -> candidate {candidate.get('side')} | sent={sent}")
+                res = gpt_handler.handle_candidate(candidate, {"recent_baseline_oi": baseline})
+                print(f"[{sym}] -> candidate {candidate.get('side')} | sent={res.get('result', {}).get('sent')}")
 
             await asyncio.sleep(FETCH_INTERVAL)
 
         except Exception as e:
-            # top-level worker exception handling (balanced)
             print("worker_loop error:", str(e))
             await asyncio.sleep(5)
 
 
 @app.on_event("startup")
 async def startup_event():
-    # Send Telegram "bot online" message once at startup
+    # Bot online झाल्यावर Telegram ला notify करणे
     try:
         telegram_module.send_text("🚀 Bot is online and running!")
     except Exception as e:
-        print("Failed to send startup alert:", e)
+        print("Telegram startup alert failed:", str(e))
 
     loop = asyncio.get_event_loop()
     loop.create_task(worker_loop())
@@ -103,10 +93,6 @@ async def startup_event():
 @app.get("/health")
 async def health():
     return {"status": "ok"}
-
-
-from fastapi.responses import JSONResponse
-import json as _json
 
 
 @app.get("/signals")
@@ -133,3 +119,17 @@ async def test_telegram():
     except Exception as e:
         return {"sent": False, "error": str(e)}
 
+
+@app.get("/redis-health")
+async def redis_health():
+    """Check Redis connectivity and keys count."""
+    try:
+        pong = ds.r.ping()
+        keys = ds.r.keys("*")
+        return {
+            "redis_ping": pong,
+            "keys_count": len(keys),
+            "keys_sample": [k.decode("utf-8") if isinstance(k, bytes) else str(k) for k in keys[:10]]
+        }
+    except Exception as e:
+        return {"error": str(e)}
